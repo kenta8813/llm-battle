@@ -1,0 +1,7 @@
+# LLM Battle Game - Python Dependencies
+
+# MCP Server framework
+fastmcp==3.0.2
+
+# HTTP client for API communication
+requests==2.31.0

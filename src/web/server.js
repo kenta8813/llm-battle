@@ -4,7 +4,16 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
+import dotenv from 'dotenv';
 import apiRouter from './api.js';
+import accountsRouter from './api/accounts.js';
+import charactersRouter from './api/characters.js';
+import matchmakingRouter from './api/matchmaking.js';
+import battlesRouter from './api/battles.js';
+import { errorHandler, notFoundHandler } from './middleware/error_handler.js';
+
+// Load environment variables
+dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -30,8 +39,12 @@ app.use((req, res, next) => {
   next();
 });
 
-// API routes
-app.use('/api', apiRouter);
+// API routes (order matters - specific routes before general ones)
+app.use('/api/accounts', accountsRouter); // Account management (create, login)
+app.use('/api/characters', charactersRouter); // Character management (CRUD) - includes /api/characters/abilities
+app.use('/api/queue', matchmakingRouter); // Matchmaking queue (CRUD)
+app.use('/api/battles', battlesRouter); // Battle management (CRUD)
+app.use('/api', apiRouter); // Existing read-only routes (leaderboard, etc.) - must be last
 
 // Static files (future web client)
 const publicPath = path.join(__dirname, '../../public');
@@ -42,16 +55,11 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({ error: 'Not found' });
-});
+// 404 handler (must be before error handler)
+app.use(notFoundHandler);
 
-// Error handler
-app.use((err, req, res, next) => {
-  console.error('Error:', err);
-  res.status(500).json({ error: 'Internal server error' });
-});
+// Error handler (must be last)
+app.use(errorHandler);
 
 // WebSocket connection handling
 io.on('connection', (socket) => {

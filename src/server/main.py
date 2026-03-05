@@ -1,7 +1,8 @@
 """
-LLMバトルゲーム MCPサーバー
+LLMバトルゲーム MCPサーバー（API client version）
 
 FastMCP 3.0.2を使用したMCPサーバーのエントリーポイント
+APIサーバー経由でデータにアクセスします。
 """
 
 import os
@@ -20,29 +21,51 @@ logging.basicConfig(
 )
 logger = logging.getLogger('llmbattle')
 
-# データベースモジュールのインポート
+# APIクライアントとセッション管理のインポート
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from database import get_connection
+from server.api_client import ApiClient
+from server.session import SessionManager
 
 # ツールモジュールのインポート
 from server.tools import account, character, battle, stats
-from server.errors import GameError, ValidationError, AuthenticationError, BattleError, DatabaseError
+from server.errors import GameError, ValidationError, AuthenticationError, BattleError
 
 # MCPサーバーの初期化
 mcp = FastMCP("LLMバトルゲーム")
 
-# データベース接続（グローバル変数として保持）
-db_conn = None
+# グローバルインスタンス
+api_client = None
+session_manager = None
 
 
-def get_db_connection():
-    """データベース接続を取得"""
-    global db_conn
-    if db_conn is None:
-        db_path = os.environ.get('DB_PATH')
-        db_conn = get_connection(db_path)
-        logger.info(f"データベース接続を確立しました: {db_path or 'デフォルトパス'}")
-    return db_conn
+def initialize_api_client():
+    """APIクライアントとセッション管理を初期化"""
+    global api_client, session_manager
+
+    # Get API base URL from environment
+    base_url = os.environ.get('API_BASE_URL', 'http://localhost:3000')
+
+    # Initialize API client
+    api_client = ApiClient(base_url=base_url)
+    logger.info(f"APIクライアントを初期化しました: {base_url}")
+
+    # Initialize session manager
+    session_manager = SessionManager()
+
+    # Load existing session if available
+    session_data = session_manager.load_session()
+    if session_data and 'token' in session_data:
+        api_client.set_token(session_data['token'])
+        logger.info(f"保存されたセッションをロードしました: account_id={session_data.get('account_id')}")
+
+    # Set instances in tool modules
+    account.set_api_client(api_client)
+    account.set_session_manager(session_manager)
+    character.set_api_client(api_client)
+    battle.set_api_client(api_client)
+    stats.set_api_client(api_client)
+
+    return api_client, session_manager
 
 
 # =====================
@@ -52,7 +75,7 @@ def get_db_connection():
 @mcp.tool()
 async def create_account(username: str) -> dict:
     """
-    新しいプレイヤーアカウントを作成します。
+    新しいプレイヤーアカウントを作成します（API経由）
 
     Args:
         username: ユーザー名（1-50文字、一意）
@@ -60,15 +83,15 @@ async def create_account(username: str) -> dict:
     Returns:
         account_id: アカウントID
         session_id: セッションID
+        token: JWT認証トークン
         message: 作成完了メッセージ
     """
     try:
         logger.info(f"Tool called: create_account(username={username})")
-        conn = get_db_connection()
-        result = account.create_account(conn, username)
+        result = account.create_account(username)
         logger.info(f"Account created: id={result['account_id']}, username={username}")
         return result
-    except (ValidationError, AuthenticationError, DatabaseError) as e:
+    except (ValidationError, AuthenticationError) as e:
         logger.error(f"Error in create_account: {e}")
         return {
             "error": {
@@ -89,7 +112,7 @@ async def create_account(username: str) -> dict:
 @mcp.tool()
 async def login(username: str) -> dict:
     """
-    既存のアカウントにログインします。
+    既存のアカウントにログインします（API経由）
 
     Args:
         username: ユーザー名
@@ -97,15 +120,15 @@ async def login(username: str) -> dict:
     Returns:
         account_id: アカウントID
         session_id: 新しいセッションID
+        token: JWT認証トークン
         characters: 所有キャラクター一覧
     """
     try:
         logger.info(f"Tool called: login(username={username})")
-        conn = get_db_connection()
-        result = account.login(conn, username)
+        result = account.login(username)
         logger.info(f"Login successful: account_id={result['account_id']}")
         return result
-    except (ValidationError, AuthenticationError, DatabaseError) as e:
+    except (ValidationError, AuthenticationError) as e:
         logger.error(f"Error in login: {e}")
         return {
             "error": {
@@ -132,54 +155,56 @@ async def create_character(
     account_id: int,
     name: str,
     prompt: str,
-    base_hp: int = None,
-    base_attack: int = None,
-    base_defense: int = None,
-    base_speed: int = None,
-    ability_ids: list[int] = None,
-    auto_allocate: bool = False,
-    total_points: int = 340,
-    auto_select_abilities: bool = False
+    base_hp: int,
+    base_attack: int,
+    base_defense: int,
+    base_speed: int,
+    ability_ids: list[int] = None
 ) -> dict:
     """
     新しいキャラクターを作成します。
 
     あなたはこのキャラクターとしてバトルに参加します。
-    promptには、キャラクターの性格、戦闘スタイル、口調などを詳しく記述してください。
+    promptを読んで、キャラクターに合ったステータス配分とアビリティを判断してください。
 
     Args:
         account_id: アカウントID
         name: キャラクター名（1-50文字）
         prompt: キャラクター設定プロンプト（50-2000文字）
-        base_hp: 基礎HP（10-100）※auto_allocate=Falseの場合は必須
-        base_attack: 基礎攻撃力（10-100）※auto_allocate=Falseの場合は必須
-        base_defense: 基礎防御力（10-100）※auto_allocate=Falseの場合は必須
-        base_speed: 基礎速度（10-100）※auto_allocate=Falseの場合は必須
+            - キャラクターの性格、戦闘スタイル、口調などを詳しく記述
+        base_hp: 基礎HP（10-100）
+        base_attack: 基礎攻撃力（10-100）
+        base_defense: 基礎防御力（10-100）
+        base_speed: 基礎速度（10-100）
         ability_ids: 習得アビリティID一覧（最大3個）
-        auto_allocate: Trueの場合、プロンプトから自動でステータスを振り分け
-        total_points: 自動振り分け時の合計ポイント（280-400、デフォルト340）
-        auto_select_abilities: Trueの場合、アビリティも自動選択
+
+    ステータス配分ルール:
+        - 合計: 280-400ポイント（推奨340）
+        - 各ステータス: 10-100の範囲
+        - promptに基づいて配分を決定してください
+          例: 「素早い剣士」→ base_speed高め、base_hp低め
+          例: 「重装騎士」→ base_hp, base_defense高め、base_speed低め
+
+    アビリティ選択:
+        - list_abilities()で利用可能なアビリティを確認できます
+        - promptに合ったアビリティを最大3個選んでください
 
     Returns:
         character_id: キャラクターID
-        computed_stats: 計算済みステータス
-        abilities: アビリティ一覧
-        allocated_stats: 自動振り分けされた基礎ステータス（auto_allocate=Trueの場合）
-        auto_allocation_reasoning: 自動振り分けの理由（auto_allocate=Trueの場合）
-        character_archetype: キャラクタータイプ（auto_allocate=Trueの場合）
+        computed_stats: 計算済みステータス（レベル1時点）
+        abilities: 習得したアビリティ一覧
         message: 作成完了メッセージ
     """
     try:
-        logger.info(f"Tool called: create_character(name={name}, account_id={account_id}, auto_allocate={auto_allocate})")
-        conn = get_db_connection()
-        result = await character.create_character(
-            conn, account_id, name, prompt,
+        logger.info(f"Tool called: create_character(name={name}, account_id={account_id})")
+        result = character.create_character(
+            account_id, name, prompt,
             base_hp, base_attack, base_defense, base_speed,
-            ability_ids, auto_allocate, total_points, auto_select_abilities
+            ability_ids
         )
         logger.info(f"Character created: id={result['character_id']}, name={name}")
         return result
-    except (ValidationError, DatabaseError) as e:
+    except ValidationError as e:
         logger.error(f"Error in create_character: {e}")
         return {
             "error": {
@@ -210,11 +235,10 @@ async def get_character_info(character_id: int) -> dict:
     """
     try:
         logger.info(f"Tool called: get_character_info(character_id={character_id})")
-        conn = get_db_connection()
-        result = character.get_character_info(conn, character_id)
+        result = character.get_character_info(character_id)
         logger.info(f"Character info retrieved: id={character_id}")
         return result
-    except (ValidationError, DatabaseError) as e:
+    except ValidationError as e:
         logger.error(f"Error in get_character_info: {e}")
         return {
             "error": {
@@ -245,11 +269,10 @@ async def list_my_characters(account_id: int) -> list[dict]:
     """
     try:
         logger.info(f"Tool called: list_my_characters(account_id={account_id})")
-        conn = get_db_connection()
-        result = character.list_my_characters(conn, account_id)
+        result = character.list_my_characters(account_id)
         logger.info(f"Characters retrieved: {len(result)} characters")
         return result
-    except DatabaseError as e:
+    except ValidationError as e:
         logger.error(f"Error in list_my_characters: {e}")
         return {
             "error": {
@@ -277,11 +300,10 @@ async def list_abilities() -> list[dict]:
     """
     try:
         logger.info(f"Tool called: list_abilities()")
-        conn = get_db_connection()
-        result = character.list_abilities(conn)
+        result = character.list_abilities()
         logger.info(f"Abilities retrieved: {len(result)} abilities")
         return result
-    except DatabaseError as e:
+    except ValidationError as e:
         logger.error(f"Error in list_abilities: {e}")
         return {
             "error": {
@@ -321,11 +343,10 @@ async def join_queue(character_id: int) -> dict:
     """
     try:
         logger.info(f"Tool called: join_queue(character_id={character_id})")
-        conn = get_db_connection()
-        result = battle.join_queue(conn, character_id)
-        logger.info(f"Queue join result: status={result['status']}")
+        result = battle.join_queue(character_id)
+        logger.info(f"Queue join result: status={result.get('status', 'unknown')}")
         return result
-    except (ValidationError, BattleError, DatabaseError) as e:
+    except (ValidationError, BattleError) as e:
         logger.error(f"Error in join_queue: {e}")
         return {
             "error": {
@@ -356,11 +377,10 @@ async def leave_queue(character_id: int) -> dict:
     """
     try:
         logger.info(f"Tool called: leave_queue(character_id={character_id})")
-        conn = get_db_connection()
-        result = battle.leave_queue(conn, character_id)
+        result = battle.leave_queue(character_id)
         logger.info(f"Left queue: character_id={character_id}")
         return result
-    except (ValidationError, DatabaseError) as e:
+    except ValidationError as e:
         logger.error(f"Error in leave_queue: {e}")
         return {
             "error": {
@@ -395,11 +415,10 @@ async def get_battle_status(battle_id: int) -> dict:
     """
     try:
         logger.info(f"Tool called: get_battle_status(battle_id={battle_id})")
-        conn = get_db_connection()
-        result = battle.get_battle_status(conn, battle_id)
-        logger.info(f"Battle status retrieved: battle_id={battle_id}, turn={result['current_turn']}")
+        result = battle.get_battle_status(battle_id)
+        logger.info(f"Battle status retrieved: battle_id={battle_id}")
         return result
-    except (BattleError, DatabaseError) as e:
+    except BattleError as e:
         logger.error(f"Error in get_battle_status: {e}")
         return {
             "error": {
@@ -425,11 +444,10 @@ async def execute_turn(
     ability_id: int = None
 ) -> dict:
     """
-    あなたのターンの行動を実行します。
+    あなたのターンの行動を実行します（現在未実装）
 
-    相手の行動も同時に決定され、両者の行動が解決されます。
-    あなたはキャラクター設定プロンプトに基づいて、
-    このキャラクターらしい行動を選択してください。
+    Note: バトル実行ロジックは今後実装予定です。
+    現在はAPIサーバーのCRUD機能のみが実装されています。
 
     Args:
         battle_id: バトルID
@@ -438,36 +456,15 @@ async def execute_turn(
         ability_id: アビリティ使用時のアビリティID
 
     Returns:
-        turn_result: ターン結果の詳細
-        your_action: あなたの行動結果
-        opponent_action: 相手の行動結果
-        your_hp_after: あなたのターン後HP
-        opponent_hp_after: 相手のターン後HP
-        battle_status: バトル状態（'in_progress' or 'finished'）
-        winner: 勝者（バトル終了時のみ）
+        エラーメッセージ（未実装）
     """
-    try:
-        logger.info(f"Tool called: execute_turn(battle_id={battle_id}, character_id={character_id}, action={action})")
-        conn = get_db_connection()
-        result = battle.execute_turn(conn, battle_id, character_id, action, ability_id)
-        logger.info(f"Turn executed: battle_id={battle_id}, status={result['battle_status']}")
-        return result
-    except (ValidationError, BattleError, DatabaseError) as e:
-        logger.error(f"Error in execute_turn: {e}")
-        return {
-            "error": {
-                "code": type(e).__name__.upper(),
-                "message": str(e)
-            }
+    logger.warning("execute_turn is not implemented yet")
+    return {
+        "error": {
+            "code": "NOT_IMPLEMENTED",
+            "message": "バトル実行機能は現在未実装です。今後のアップデートで実装予定です。"
         }
-    except Exception as e:
-        logger.error(f"Unexpected error in execute_turn: {e}", exc_info=True)
-        return {
-            "error": {
-                "code": "INTERNAL_ERROR",
-                "message": "予期しないエラーが発生しました"
-            }
-        }
+    }
 
 
 @mcp.tool()
@@ -487,11 +484,10 @@ async def get_battle_history(
     """
     try:
         logger.info(f"Tool called: get_battle_history(character_id={character_id}, limit={limit})")
-        conn = get_db_connection()
-        result = battle.get_battle_history(conn, character_id, limit)
+        result = battle.get_battle_history(character_id, limit)
         logger.info(f"Battle history retrieved: {len(result)} battles")
         return result
-    except DatabaseError as e:
+    except ValidationError as e:
         logger.error(f"Error in get_battle_history: {e}")
         return {
             "error": {
@@ -526,11 +522,10 @@ async def get_leaderboard(limit: int = 50) -> list[dict]:
     """
     try:
         logger.info(f"Tool called: get_leaderboard(limit={limit})")
-        conn = get_db_connection()
-        result = stats.get_leaderboard(conn, limit)
+        result = stats.get_leaderboard(limit)
         logger.info(f"Leaderboard retrieved: {len(result)} entries")
         return result
-    except DatabaseError as e:
+    except ValidationError as e:
         logger.error(f"Error in get_leaderboard: {e}")
         return {
             "error": {
@@ -561,11 +556,10 @@ async def get_character_stats(character_id: int) -> dict:
     """
     try:
         logger.info(f"Tool called: get_character_stats(character_id={character_id})")
-        conn = get_db_connection()
-        result = stats.get_character_stats(conn, character_id)
-        logger.info(f"Character stats retrieved: character_id={character_id}, rating={result['rating']}")
+        result = stats.get_character_stats(character_id)
+        logger.info(f"Character stats retrieved: character_id={character_id}")
         return result
-    except (ValidationError, DatabaseError) as e:
+    except ValidationError as e:
         logger.error(f"Error in get_character_stats: {e}")
         return {
             "error": {
@@ -590,12 +584,12 @@ async def get_character_stats(character_id: int) -> dict:
 if __name__ == "__main__":
     try:
         logger.info("=" * 60)
-        logger.info("LLMバトルゲーム MCPサーバーを起動します")
+        logger.info("LLMバトルゲーム MCPサーバーを起動します（API client mode）")
         logger.info("=" * 60)
 
-        # データベース接続確認
-        conn = get_db_connection()
-        logger.info("データベース接続確認完了")
+        # APIクライアント初期化
+        initialize_api_client()
+        logger.info("APIクライアント初期化完了")
 
         # サーバー起動
         logger.info("MCPサーバーを起動しました（STDIO接続待機中）")
@@ -606,7 +600,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"サーバー起動中にエラーが発生しました: {e}", exc_info=True)
         sys.exit(1)
-    finally:
-        if db_conn:
-            db_conn.close()
-            logger.info("データベース接続を閉じました")

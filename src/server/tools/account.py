@@ -1,169 +1,97 @@
 """
-アカウント管理ツール
+アカウント管理ツール（API経由）
 """
 
-import re
-import uuid
-import sqlite3
-from datetime import datetime, timedelta
-from typing import Dict, Any, List
-
-from ..errors import ValidationError, AuthenticationError, DatabaseError
+from typing import Dict, Any
+from ..api_client import ApiClient
+from ..session import SessionManager
+from ..errors import ValidationError, AuthenticationError
 
 
-def validate_username(username: str) -> None:
+# グローバルインスタンス（main.pyで初期化される）
+_api_client: ApiClient = None
+_session_manager: SessionManager = None
+
+
+def set_api_client(client: ApiClient):
+    """Set API client instance"""
+    global _api_client
+    _api_client = client
+
+
+def set_session_manager(manager: SessionManager):
+    """Set session manager instance"""
+    global _session_manager
+    _session_manager = manager
+
+
+def create_account(username: str) -> Dict[str, Any]:
     """
-    ユーザー名のバリデーション
+    新しいプレイヤーアカウントを作成します（API経由）
 
     Args:
-        username: 検証するユーザー名
-
-    Raises:
-        ValidationError: バリデーションエラー
-    """
-    if not username:
-        raise ValidationError("ユーザー名を入力してください")
-
-    if len(username) < 1 or len(username) > 50:
-        raise ValidationError("ユーザー名は1-50文字で入力してください")
-
-    # 英数字とアンダースコアのみ許可
-    if not re.match(r'^[a-zA-Z0-9_]+$', username):
-        raise ValidationError("ユーザー名は英数字とアンダースコア(_)のみ使用できます")
-
-
-def create_account(conn: sqlite3.Connection, username: str) -> Dict[str, Any]:
-    """
-    新しいプレイヤーアカウントを作成します。
-
-    Args:
-        conn: データベース接続
         username: ユーザー名（1-50文字、一意）
 
     Returns:
         account_id: アカウントID
         session_id: セッションID
+        token: JWT認証トークン
         message: 作成完了メッセージ
 
     Raises:
         ValidationError: バリデーションエラー
-        DatabaseError: データベースエラー
+        AuthenticationError: 認証エラー
     """
-    try:
-        # バリデーション
-        validate_username(username)
+    if not _api_client:
+        raise RuntimeError("API client not initialized")
 
-        # 重複チェック
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM accounts WHERE username = ?", (username,))
-        if cursor.fetchone() is not None:
-            raise ValidationError(f"ユーザー名 '{username}' は既に使用されています")
+    # Call API
+    result = _api_client.create_account(username)
 
-        # セッションIDを生成
-        session_id = str(uuid.uuid4())
-
-        # アカウント作成
-        cursor.execute(
-            """
-            INSERT INTO accounts (username, session_id, created_at, last_login)
-            VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """,
-            (username, session_id)
+    # Save token to session
+    if 'token' in result and _session_manager:
+        _session_manager.save_session(
+            account_id=result['account_id'],
+            session_id=result['session_id'],
+            token=result['token'],
+            username=username
         )
-        account_id = cursor.lastrowid
-        conn.commit()
+        _api_client.set_token(result['token'])
 
-        return {
-            "account_id": account_id,
-            "session_id": session_id,
-            "message": f"アカウント '{username}' が作成されました"
-        }
-
-    except ValidationError:
-        raise
-    except sqlite3.IntegrityError as e:
-        raise ValidationError(f"ユーザー名 '{username}' は既に使用されています")
-    except sqlite3.Error as e:
-        raise DatabaseError(f"データベースエラー: {e}")
+    return result
 
 
-def login(conn: sqlite3.Connection, username: str) -> Dict[str, Any]:
+def login(username: str) -> Dict[str, Any]:
     """
-    既存のアカウントにログインします。
+    既存のアカウントにログインします（API経由）
 
     Args:
-        conn: データベース接続
         username: ユーザー名
 
     Returns:
         account_id: アカウントID
         session_id: 新しいセッションID
+        token: JWT認証トークン
         characters: 所有キャラクター一覧
+        message: ログインメッセージ
 
     Raises:
         AuthenticationError: 認証エラー
-        DatabaseError: データベースエラー
     """
-    try:
-        # バリデーション
-        validate_username(username)
+    if not _api_client:
+        raise RuntimeError("API client not initialized")
 
-        # アカウント検索
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM accounts WHERE username = ?", (username,))
-        row = cursor.fetchone()
+    # Call API
+    result = _api_client.login(username)
 
-        if row is None:
-            raise AuthenticationError(f"ユーザー名 '{username}' は存在しません")
-
-        account_id = row[0]
-
-        # 新しいセッションIDを生成
-        session_id = str(uuid.uuid4())
-
-        # セッションIDと最終ログイン時刻を更新
-        cursor.execute(
-            """
-            UPDATE accounts
-            SET session_id = ?, last_login = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (session_id, account_id)
+    # Save token to session
+    if 'token' in result and _session_manager:
+        _session_manager.save_session(
+            account_id=result['account_id'],
+            session_id=result['session_id'],
+            token=result['token'],
+            username=username
         )
+        _api_client.set_token(result['token'])
 
-        # 所有キャラクター一覧を取得
-        cursor.execute(
-            """
-            SELECT id, name, level, computed_hp, computed_attack, computed_defense, computed_speed
-            FROM characters
-            WHERE account_id = ?
-            ORDER BY created_at DESC
-            """,
-            (account_id,)
-        )
-
-        characters = []
-        for row in cursor.fetchall():
-            characters.append({
-                "id": row[0],
-                "name": row[1],
-                "level": row[2],
-                "hp": row[3],
-                "attack": row[4],
-                "defense": row[5],
-                "speed": row[6]
-            })
-
-        conn.commit()
-
-        return {
-            "account_id": account_id,
-            "session_id": session_id,
-            "characters": characters,
-            "message": f"ようこそ、{username}さん！"
-        }
-
-    except (ValidationError, AuthenticationError):
-        raise
-    except sqlite3.Error as e:
-        raise DatabaseError(f"データベースエラー: {e}")
+    return result
