@@ -13,6 +13,8 @@ venv/
 *.db
 *.sqlite
 *.sqlite3
+*.db-shm
+*.db-wal
 
 # Build outputs
 dist/
@@ -44,6 +46,11 @@ yarn-error.log*
 # Temporary files
 *.tmp
 .cache/
+quick_match.py
+test_*.py
 
 # Claude Code internal files
 .claude/
+
+# Session storage
+.llmbattle/
