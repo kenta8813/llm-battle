@@ -95,11 +95,18 @@ CREATE TABLE IF NOT EXISTS battles (
     max_turns INTEGER DEFAULT 50,
     current_turn INTEGER DEFAULT 0,
 
+    -- 現在のHP
+    player1_hp INTEGER,
+    player2_hp INTEGER,
+    player1_max_hp INTEGER,
+    player2_max_hp INTEGER,
+
     -- 状態
     status TEXT NOT NULL DEFAULT 'waiting' CHECK(status IN ('waiting', 'in_progress', 'finished', 'cancelled')),
 
     -- 時刻
     started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     ended_at DATETIME,
 
     FOREIGN KEY (player1_id) REFERENCES characters(id) ON DELETE CASCADE,

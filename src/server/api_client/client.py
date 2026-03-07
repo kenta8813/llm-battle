@@ -259,6 +259,25 @@ class ApiClient:
 
         return self._request('POST', f'/api/battles/{battle_id}/turns', json_data=data)
 
+    def execute_action(
+        self,
+        battle_id: int,
+        character_id: int,
+        action: str,
+        ability_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Submit action for a battle turn
+
+        Returns:
+            - {'status': 'waiting', 'message': ...} if waiting for opponent
+            - Turn result with HP/damage info if both players have submitted
+        """
+        data = {'character_id': character_id, 'action': action}
+        if ability_id is not None:
+            data['ability_id'] = ability_id
+        return self._request('POST', f'/api/battles/{battle_id}/action', json_data=data)
+
     def get_battle(self, battle_id: int) -> Dict[str, Any]:
         """Get battle status"""
         return self._request('GET', f'/api/battles/{battle_id}')

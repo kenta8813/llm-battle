@@ -444,27 +444,35 @@ async def execute_turn(
     ability_id: int = None
 ) -> dict:
     """
-    あなたのターンの行動を実行します（現在未実装）
+    バトルのターンで行動を実行します。
 
-    Note: バトル実行ロジックは今後実装予定です。
-    現在はAPIサーバーのCRUD機能のみが実装されています。
+    両プレイヤーがそれぞれ行動を送信し、双方の送信後にサーバー側でターンが解決されます。
+    相手がまだ行動を送信していない場合は status='waiting' を返します。
 
     Args:
         battle_id: バトルID
         character_id: あなたのキャラクターID
         action: 行動タイプ（'attack', 'defend', 'dodge', 'ability'）
-        ability_id: アビリティ使用時のアビリティID
+        ability_id: アビリティ使用時のアビリティID（action='ability'の場合に必要）
 
     Returns:
-        エラーメッセージ（未実装）
+        status='waiting': 相手の行動待ち中
+        status='in_progress': ターン解決済み、バトル継続中（player1_hp, player2_hp等を含む）
+        status='finished': バトル終了（winner_id, is_drawを含む）
     """
-    logger.warning("execute_turn is not implemented yet")
-    return {
-        "error": {
-            "code": "NOT_IMPLEMENTED",
-            "message": "バトル実行機能は現在未実装です。今後のアップデートで実装予定です。"
+    try:
+        logger.info(f"Tool called: execute_turn(battle_id={battle_id}, character_id={character_id}, action={action})")
+        result = battle.execute_action(battle_id, character_id, action, ability_id)
+        logger.info(f"execute_turn result: status={result.get('status')}")
+        return result
+    except Exception as e:
+        logger.error(f"Unexpected error in execute_turn: {e}", exc_info=True)
+        return {
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": "予期しないエラーが発生しました"
+            }
         }
-    }
 
 
 @mcp.tool()

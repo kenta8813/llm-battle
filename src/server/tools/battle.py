@@ -56,6 +56,20 @@ def leave_queue(character_id: int) -> Dict[str, Any]:
     return _api_client.leave_queue(character_id)
 
 
+def execute_action(battle_id: int, character_id: int, action: str, ability_id: int = None) -> Dict[str, Any]:
+    """
+    Submit action for a battle turn (API経由)
+
+    Returns:
+        - {'status': 'waiting'} if waiting for opponent's action
+        - Turn result with HP/damage info when both players have submitted
+    """
+    if not _api_client:
+        raise RuntimeError("API client not initialized")
+
+    return _api_client.execute_action(battle_id, character_id, action, ability_id)
+
+
 def get_battle_status(battle_id: int) -> Dict[str, Any]:
     """
     Get current battle status (API経由)
