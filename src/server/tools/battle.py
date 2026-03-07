@@ -92,7 +92,7 @@ def get_battle_history(character_id: int, limit: int = 10) -> list[Dict[str, Any
 
     Args:
         character_id: Character ID
-        limit: Maximum number of battles to return
+        limit: Maximum number of battles to return (max 50)
 
     Returns:
         List of battle records
@@ -100,11 +100,8 @@ def get_battle_history(character_id: int, limit: int = 10) -> list[Dict[str, Any
     if not _api_client:
         raise RuntimeError("API client not initialized")
 
-    # Note: This endpoint may not exist yet in the API
-    # For now, return empty list
-    # TODO: Implement battle history API endpoint
-    logger.warning("Battle history API not implemented yet")
-    return []
+    result = _api_client.get_battle_history(character_id, limit)
+    return result.get('battles', [])
 
 
 # Note: Battle execution logic should remain local in MCP server

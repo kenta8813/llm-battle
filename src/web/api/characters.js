@@ -274,6 +274,57 @@ router.get('/:id', async (req, res, next) => {
 });
 
 /**
+ * Get battle history for a character
+ * GET /api/characters/:id/battles?limit=10
+ */
+router.get('/:id/battles', async (req, res, next) => {
+  try {
+    const characterId = parseInt(req.params.id);
+    validatePositiveInteger(characterId, 'character_id');
+
+    const limit = Math.min(parseInt(req.query.limit) || 10, 50);
+
+    const chars = await query('SELECT id FROM characters WHERE id = ?', [characterId]);
+    if (chars.length === 0) throw new NotFoundError('Character');
+
+    const battles = await query(
+      `SELECT b.id, b.player1_id, b.player2_id, b.winner_id, b.status,
+              b.current_turn, b.started_at,
+              c1.name as player1_name, c2.name as player2_name,
+              CASE
+                WHEN b.winner_id = ? THEN 'win'
+                WHEN b.status = 'finished' AND b.winner_id IS NULL THEN 'draw'
+                WHEN b.status = 'finished' THEN 'loss'
+                ELSE b.status
+              END as result
+       FROM battles b
+       JOIN characters c1 ON b.player1_id = c1.id
+       JOIN characters c2 ON b.player2_id = c2.id
+       WHERE (b.player1_id = ? OR b.player2_id = ?)
+       ORDER BY b.started_at DESC
+       LIMIT ?`,
+      [characterId, characterId, characterId, limit]
+    );
+
+    res.json({
+      character_id: characterId,
+      battles: battles.map(row => ({
+        battle_id: row.id,
+        opponent_id: row.player1_id === characterId ? row.player2_id : row.player1_id,
+        opponent_name: row.player1_id === characterId ? row.player2_name : row.player1_name,
+        result: row.result,
+        turns: row.current_turn,
+        status: row.status,
+        started_at: row.started_at
+      }))
+    });
+
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * List characters by account
  * GET /api/characters?account_id=1
  */

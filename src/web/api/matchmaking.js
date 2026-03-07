@@ -207,9 +207,9 @@ async function findMatch(characterId, rating) {
  * @returns {Promise<Object>} Battle creation result
  */
 async function createBattle(player1Id, player2Id) {
-  // Verify both characters exist
+  // Verify both characters exist and get HP
   const chars = await query(
-    'SELECT id FROM characters WHERE id IN (?, ?)',
+    'SELECT id, computed_hp FROM characters WHERE id IN (?, ?)',
     [player1Id, player2Id]
   );
 
@@ -217,13 +217,19 @@ async function createBattle(player1Id, player2Id) {
     throw new NotFoundError('One or both characters not found');
   }
 
+  const char1 = chars.find(c => c.id === player1Id);
+  const char2 = chars.find(c => c.id === player2Id);
+
   // Create battle in transaction
   const result = await transaction(async () => {
-    // Create battle (using schema columns: started_at, status)
     const battleResult = await run(
-      `INSERT INTO battles (player1_id, player2_id, current_turn, status, started_at)
-       VALUES (?, ?, 0, 'in_progress', CURRENT_TIMESTAMP)`,
-      [player1Id, player2Id]
+      `INSERT INTO battles (
+        player1_id, player2_id, current_turn,
+        player1_hp, player2_hp, player1_max_hp, player2_max_hp,
+        status, started_at, updated_at
+      )
+      VALUES (?, ?, 0, ?, ?, ?, ?, 'in_progress', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [player1Id, player2Id, char1.computed_hp, char2.computed_hp, char1.computed_hp, char2.computed_hp]
     );
 
     const battleId = battleResult.lastID;

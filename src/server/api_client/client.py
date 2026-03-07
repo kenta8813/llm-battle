@@ -286,6 +286,10 @@ class ApiClient:
         """Get battle turns"""
         return self._request('GET', f'/api/battles/{battle_id}/turns')
 
+    def get_battle_history(self, character_id: int, limit: int = 10) -> Dict[str, Any]:
+        """Get battle history for a character"""
+        return self._request('GET', f'/api/characters/{character_id}/battles', params={'limit': limit})
+
     # Stats API
     def get_leaderboard(self, limit: int = 50) -> Dict[str, Any]:
         """Get leaderboard"""

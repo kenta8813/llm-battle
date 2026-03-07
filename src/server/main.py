@@ -457,8 +457,20 @@ async def execute_turn(
 
     Returns:
         status='waiting': 相手の行動待ち中
+            → get_battle_status(battle_id) を繰り返し呼んで current_turn が増えるまで待機してください
         status='in_progress': ターン解決済み、バトル継続中（player1_hp, player2_hp等を含む）
+            → 次のターンに進んでください
         status='finished': バトル終了（winner_id, is_drawを含む）
+
+    バトルのループ例:
+        while True:
+            result = execute_turn(battle_id, character_id, action='attack')
+            if result['status'] == 'waiting':
+                # 相手の行動を待つ（ポーリング）
+                while get_battle_status(battle_id)['current_turn'] == current_turn:
+                    pass  # 少し待ってから再確認
+            elif result['status'] == 'finished':
+                break
     """
     try:
         logger.info(f"Tool called: execute_turn(battle_id={battle_id}, character_id={character_id}, action={action})")
