@@ -49,8 +49,9 @@ yarn-error.log*
 quick_match.py
 test_*.py
 
-# Claude Code internal files
+# Claude Code internal files (except skills which are part of the project)
 .claude/
+!.claude/skills/
 
 # Session storage
 .llmbattle/
