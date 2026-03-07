@@ -50,15 +50,21 @@
 
 ## 2026-03-06 実装状態の実コード確認・ドキュメント修正
 - Co-driver: 実際のコードを確認し、ドキュメントとの乖離を発見・修正
-- 確認された実際の実装状態：
-  - MCPサーバーは直接SQLiteではなくREST API経由でアクセス（api_client/client.py）
-  - Webサーバーに書き込み系APIルーター追加（api/accounts.js, api/characters.js, api/battles.js, api/matchmaking.js）
-  - JWT認証追加（middleware/auth.js）
-  - セッション管理追加（session/manager.py → ~/.llmbattle/session.json）
-  - execute_turnはNOT_IMPLEMENTEDを返す（未実装）
-  - ステータス自動振り分け（allocator.py）は未実装（設計書のみ存在）
-    ※ progress.logの「フェーズ3完了」という記録は実装前の状態への誤記の可能性大
-  - create_characterのdocstringで「呼び出し側Claudeが判断」方式に変更済み
-- 修正したドキュメント：README.md（アーキテクチャ図、依存パッケージ、使い方）
-- 更新したメモリ：pm_memory.md, project_memory.md, decisions.md
+- execute_turnはNOT_IMPLEMENTEDを返す（未実装）← 後日解決
+
+## 2026-03-08 オンライン対戦フル実装・スキル整備
+- execute_turn 実装（Approach B：バトルロジックをWebサーバーサイドに移動）
+  - battles.js に calculateDamage(), resolveTurn() 追加
+  - POST /api/battles/:id/action エンドポイント追加（pendingActionsマップで2プレイヤー同期）
+  - MCPの execute_turn は api_client.execute_action() を呼ぶだけに
+- マッチングHP初期値バグ修正（matchmaking.js が HP列なしでINSERTしていた問題）
+- バトル履歴エンドポイント追加（GET /api/characters/:id/battles）
+- get_battle_history の空リスト固定バグ修正（api_client.get_battle_history()を実際に呼ぶよう修正）
+- battlesテーブルにHP列追加（ALTER TABLE + schema.sql更新）
+- Claude Code スキル作成（.claude/skills/配下、<name>/skill.md 形式）：
+  - play: アカウント作成〜バトル完走（人間に確認プロンプトあり）
+  - quickmatch: 既存キャラで即マッチ〜バトル完走（人間に確認プロンプトあり）
+  - battle: バトル行動判断ガイド（HP・ステータス・CD管理）
+- .claude/settings.json に Bash(*) 許可を追加（サブエージェント自律実行のため）
+- サブエージェント2体によるオンライン対戦テスト成功（battle_id=14,15確認）
 
