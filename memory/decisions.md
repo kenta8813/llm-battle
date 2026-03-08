@@ -52,6 +52,17 @@
 - Co-driver: 実際のコードを確認し、ドキュメントとの乖離を発見・修正
 - execute_turnはNOT_IMPLEMENTEDを返す（未実装）← 後日解決
 
+## 2026-03-08 MCPレイヤーをNode.jsに統合・リモートMCPエンドポイント実装
+- コンセプト変更：「誰でも自分のLLMを接続して戦わせられるオンラインゲーム」
+- Python MCPサーバーは廃止方針、Node.jsに統合
+- `@modelcontextprotocol/sdk` + `zod` を Node.js サーバーに追加
+- `src/web/mcp/index.js` 新規作成（7ツール）
+- io.js シングルトンで循環依存を解消（server.js ← battles.js 問題）
+- `accounts` テーブルに `api_key` 列追加（マイグレーション自動実行）
+- MCPエンドポイント: `POST /mcp` + `x-api-key` ヘッダー
+- ツール: get_my_status, list_abilities, create_character, join_queue, check_queue, get_battle_state, take_action
+- 各ツールレスポンスに next_step を含む（LLMがドキュメントなしで次手を把握できる設計）
+
 ## 2026-03-08 オンライン対戦フル実装・スキル整備
 - execute_turn 実装（Approach B：バトルロジックをWebサーバーサイドに移動）
   - battles.js に calculateDamage(), resolveTurn() 追加

@@ -1,462 +1,254 @@
 # システムアーキテクチャ設計書
 
-**プロジェクト**: LLMバトルゲーム
-**作成日**: 2026-02-28
-**担当**: Director
+**プロジェクト**: LLM Battle Game
+**最終更新**: 2026-03-08
 
 ---
 
 ## 1. システム概要
 
-LLM同士が完全自律的に戦うターン制バトルゲーム。プレイヤーはキャラクター設定プロンプトを作成し、LLMがそのキャラクターとして戦闘を行う。
+**コンセプト**: 自分のLLMをMCPサーバーに接続するだけで、世界中のLLMと自律対戦できるオンラインゲーム。
 
-### 設計原則
-- ローカル環境で完結（外部クラウド不要）
-- シンプルで拡張可能
-- LLMの自律性を最大化
-- 「言ったもん勝ち」要素の考慮
+プレイヤーはAPIキーをLLMの設定に追加するだけ。あとはLLMが「キャラクター作成 → マッチング → バトル」をすべて自律的に行う。
 
 ---
 
-## 2. 全体アーキテクチャ
+## 2. アーキテクチャ全体図
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Claude Desktop                        │
-│              (プレイヤー1のLLMクライアント)                │
-└───────────────────────┬─────────────────────────────────┘
-                        │ MCP Protocol (STDIO)
-                        │
-┌───────────────────────▼─────────────────────────────────┐
-│                                                          │
-│                   MCP Server (Python)                    │
-│                                                          │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐    │
-│  │   Auth      │  │   Battle    │  │  Database   │    │
-│  │   Module    │  │   Logic     │  │   Access    │    │
-│  └─────────────┘  └─────────────┘  └─────────────┘    │
-│                                                          │
-└───────────────────────┬─────────────────────────────────┘
-                        │
-                        │ ├─ SQLite (データ永続化)
-                        │ └─ WebSocket (状態通知)
-                        │
-┌───────────────────────▼─────────────────────────────────┐
-│                 Web Server (Node.js)                     │
-│                Express + Socket.IO                       │
-│                                                          │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐    │
-│  │   REST      │  │  WebSocket  │  │   Static    │    │
-│  │   API       │  │   Handler   │  │   Files     │    │
-│  └─────────────┘  └─────────────┘  └─────────────┘    │
-│                                                          │
-└───────────────────────┬─────────────────────────────────┘
-                        │ HTTP/WebSocket
-                        │
-┌───────────────────────▼─────────────────────────────────┐
-│              Web Client (React + Vite)                   │
-│                                                          │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐    │
-│  │   Battle    │  │  Character  │  │Leaderboard  │    │
-│  │   Viewer    │  │   Manager   │  │   Viewer    │    │
-│  └─────────────┘  └─────────────┘  └─────────────┘    │
-│                                                          │
-└─────────────────────────────────────────────────────────┘
+世界中のユーザーのLLM（Claude / GPT / Gemini etc）
+  │
+  │  MCP over HTTP  (x-api-key ヘッダー)
+  │  POST /mcp
+  ▼
+┌─────────────────────────────────────────────┐
+│           Node.js Server (port 3000)         │
+│                                             │
+│  ┌──────────────┐   ┌─────────────────────┐ │
+│  │ MCP Layer    │   │ REST API Layer       │ │
+│  │ /mcp         │   │ /api/accounts        │ │
+│  │              │   │ /api/characters      │ │
+│  │ 7 tools:     │   │ /api/battles         │ │
+│  │ get_my_status│   │ /api/queue           │ │
+│  │ list_abilities   │ /api/leaderboard     │ │
+│  │ create_char  │   └─────────────────────┘ │
+│  │ join_queue   │                            │
+│  │ check_queue  │   ┌─────────────────────┐ │
+│  │ get_battle_  │   │ WebSocket (Socket.IO) │ │
+│  │   state      │   │ /                    │ │
+│  │ take_action  │   │ battle_started       │ │
+│  └──────────────┘   │ turn_executed        │ │
+│                     │ battle_ended         │ │
+│                     └─────────────────────┘ │
+└─────────────────────────────┬───────────────┘
+                              │
+                              ▼
+                    SQLite (WALモード)
+                    src/database/llmbattle.db
 
-┌─────────────────────────────────────────────────────────┐
-│                     SQLite Database                      │
-│                                                          │
-│  accounts │ characters │ battles │ stats │ queue       │
-│                                                          │
-└─────────────────────────────────────────────────────────┘
+                              │  HTTP/WebSocket
+                              ▼
+                ┌─────────────────────────┐
+                │  Web Client (React+Vite) │
+                │  観戦・リーダーボード    │
+                │  localhost:5173 (dev)    │
+                └─────────────────────────┘
 ```
 
 ---
 
-## 3. コンポーネント構成
+## 3. コンポーネント詳細
 
-### 3.1 MCPサーバー（Python FastMCP）
+### 3.1 MCPレイヤー (`src/web/mcp/index.js`)
 
-**責務**:
-- LLMクライアントとの通信（MCPプロトコル）
-- 認証・セッション管理
-- バトルロジックの実行
-- データベースアクセス
-- Webサーバーへの状態通知
+**役割**: LLMからのMCP接続を受け付け、ゲームロジックへ橋渡し
 
-**主要モジュール**:
+**認証**: `x-api-key` ヘッダーでアカウントを識別。接続ごとに `buildMcpServer(account)` を生成してスコープを閉じる。
 
-```
-src/server/
-├── main.py                 # MCPサーバーエントリポイント
-├── auth/
-│   ├── __init__.py
-│   ├── account.py          # アカウント管理
-│   └── session.py          # セッション管理
-├── battle/
-│   ├── __init__.py
-│   ├── engine.py           # バトルエンジン
-│   ├── turn.py             # ターン進行
-│   ├── calculator.py       # ダメージ計算
-│   └── judge.py            # 勝敗判定
-├── character/
-│   ├── __init__.py
-│   ├── character.py        # キャラクター管理
-│   └── stats.py            # ステータス計算
-├── database/
-│   ├── __init__.py
-│   ├── connection.py       # DB接続
-│   ├── accounts.py         # アカウントDB
-│   ├── characters.py       # キャラクターDB
-│   ├── battles.py          # バトルDB
-│   └── queue.py            # マッチングキューDB
-├── matchmaking/
-│   ├── __init__.py
-│   └── matcher.py          # マッチングロジック
-└── tools/
-    ├── __init__.py
-    ├── account_tools.py    # アカウント操作ツール
-    ├── character_tools.py  # キャラクター操作ツール
-    └── battle_tools.py     # バトル操作ツール
-```
+**トランスポート**: `StreamableHTTPServerTransport`（Stateless）- 各リクエストが独立
 
-**技術スタック**:
-- Python 3.12
-- FastMCP 3.0.2
-- sqlite3（標準ライブラリ）
-
-### 3.2 Webサーバー（Node.js + Express）
-
-**責務**:
-- REST API提供
-- WebSocketによるリアルタイム通信
-- 静的ファイル配信
-- クライアント状態管理
-
-**主要モジュール**:
+**next_step パターン**: 全ツールのレスポンスに `next_step` フィールドを含める。LLMがドキュメントなしで次の行動を判断できる。
 
 ```
-src/web/server/
-├── index.js                # サーバーエントリポイント
-├── api/
-│   ├── battles.js          # バトル情報API
-│   ├── characters.js       # キャラクター情報API
-│   └── leaderboard.js      # リーダーボードAPI
-├── socket/
-│   ├── handler.js          # WebSocketハンドラ
-│   └── events.js           # イベント定義
-└── middleware/
-    ├── cors.js             # CORS設定
-    └── error.js            # エラーハンドリング
+get_my_status()
+  → { characters: [...], next_step: "join_queue または create_character を呼んでください" }
+
+join_queue(character_id)
+  → { status: "matched", battle_id: 5, next_step: "get_battle_state(battle_id: 5, ...) で状態確認" }
+  OR
+  → { status: "waiting", next_step: "check_queue(character_id: N) でポーリング" }
+
+take_action(battle_id, my_character_id, action)
+  → { turn_number: 1, your_damage_dealt: 45, ..., next_step: "get_battle_state then take_action" }
+  OR
+  → { status: "waiting", next_step: "相手待ち。get_battle_state で確認" }
 ```
 
-**技術スタック**:
-- Node.js v25.2.1
-- Express.js
-- Socket.IO
+### 3.2 バトル処理 (`src/web/api/battles.js`)
 
-### 3.3 Webクライアント（React + Vite）
-
-**責務**:
-- バトルの可視化
-- キャラクター管理画面
-- リーダーボード表示
-- リアルタイム更新受信
-
-**主要コンポーネント**:
+**同時行動制**: `pendingActions` Map でターンごとに両プレイヤーの行動を保持。両方揃ったらターン解決。
 
 ```
-src/web/client/
-├── src/
-│   ├── App.jsx             # アプリケーションルート
-│   ├── main.jsx            # エントリポイント
-│   ├── components/
-│   │   ├── Battle/
-│   │   │   ├── BattleViewer.jsx
-│   │   │   ├── BattleField.jsx
-│   │   │   ├── CharacterCard.jsx
-│   │   │   ├── TurnIndicator.jsx
-│   │   │   └── ActionLog.jsx
-│   │   ├── Character/
-│   │   │   ├── CharacterList.jsx
-│   │   │   └── CharacterDetails.jsx
-│   │   └── Leaderboard/
-│   │       └── LeaderboardTable.jsx
-│   ├── hooks/
-│   │   ├── useWebSocket.js
-│   │   └── useBattleState.js
-│   └── api/
-│       └── client.js       # APIクライアント
-└── public/
-    └── assets/             # 画像・アイコン等
+Player A → take_action → pendingActions[battle_id].player1 = {action}
+Player B → take_action → pendingActions[battle_id].player2 = {action}
+                       → 両方揃った → resolveTurn() → DB保存 → Socket.IO emit
 ```
 
-**技術スタック**:
-- React 18
-- Vite
-- Socket.IO Client
+**エクスポート済み関数**:
+- `processBattleAction(battleId, characterId, action, abilityId)` - MCP と REST 共用
+- `resolveTurn(char1Stats, char2Stats, p1Action, p2Action, ability1, ability2, battle)`
+- `calculateDamage(attackerStats, defenderAction, defenderStats, actionType, ability)`
+- `pendingActions` - in-memory Map
 
-### 3.4 データベース（SQLite）
+### 3.3 Socket.IO シングルトン (`src/web/io.js`)
 
-**責務**:
-- すべてのゲームデータの永続化
-- トランザクション管理
-- 履歴データ保存
+循環依存（`server.js` ↔ `battles.js` ↔ `mcp/index.js`）を防ぐため、`io` インスタンスをシングルトンで管理。
 
-**データベースファイル**:
-```
-src/database/
-└── llmbattle.db            # 単一DBファイル
+```javascript
+// server.js
+setIo(io);  // 起動時に登録
+
+// battles.js, mcp/index.js
+getIo()?.to(`battle_${id}`).emit(...)  // 使用時に取得
 ```
 
 ---
 
 ## 4. データフロー
 
-### 4.1 アカウント作成フロー
+### 4.1 LLMプレイヤーのフロー
 
 ```
-[Claude Desktop]
-    → MCP: create_account(username)
-    → DB: INSERT accounts
-    ← MCP: account_id
-[Claude Desktop]
+① アカウント作成
+  POST /api/accounts → { api_key }
+  ※ 以後はMCPツールのみで完結
+
+② キャラクター準備
+  get_my_status() → characters がなければ
+  list_abilities() → create_character(name, concept, hp, atk, def, spd, ability_ids)
+
+③ マッチング
+  join_queue(character_id)
+    → 即マッチ: { status: "matched", battle_id }
+    → 待機: { status: "waiting" }
+        → check_queue() でポーリング
+
+④ バトルループ（両プレイヤーが並行実行）
+  get_battle_state(battle_id, my_character_id)
+    → my.hp, opponent.hp, my_abilities, current_turn
+
+  take_action(battle_id, my_character_id, action, ability_id?)
+    → { status: "waiting" }  # 相手待ち → get_battle_state でポーリング
+    → { turn_number, damage, hp, next_step }  # ターン解決
+
+  (HPが0または最大ターン到達まで繰り返す)
+
+⑤ 結果
+  get_battle_state() → { status: "finished", winner }
 ```
 
-### 4.2 キャラクター作成フロー
+### 4.2 ターン解決フロー（サーバー側）
 
 ```
-[Claude Desktop]
-    → MCP: create_character(name, prompt, base_stats)
-    → DB: INSERT characters
-    → Calc: ステータス計算
-    → DB: UPDATE characters (computed_stats)
-    ← MCP: character_id
-[Claude Desktop]
-```
+take_action (Player1)
+  └→ pendingActions[id].player1 = action
+     └→ player2がまだ → { status: "waiting" } を返す
 
-### 4.3 マッチング〜バトルフロー
-
-```
-[Claude Desktop]
-    → MCP: join_queue(character_id)
-    → DB: INSERT queue
-    → Matcher: マッチング処理
-    → DB: マッチング成立時にバトルレコード作成
-    ← MCP: battle_id, opponent_info
-
-[バトル開始]
-    → MCPサーバー: バトルセッション作成
-    → WebSocket: battle_started イベント送信
-    → Web Client: バトル画面表示
-
-[各ターン]
-    → MCP: execute_turn(battle_id)
-    → LLM1: アクション決定（攻撃/防御/回避/アビリティ）
-    → LLM2: アクション決定
-    → Battle Engine: アクション解決
-    → DB: UPDATE battles (battle_log)
-    → WebSocket: turn_executed イベント送信
-    → Web Client: アクション結果表示
-
-[勝敗判定]
-    → Battle Engine: HP 0以下 or 最大ターン到達
-    → DB: UPDATE battles (winner_id, ended_at)
-    → DB: UPDATE stats (勝敗記録)
-    → WebSocket: battle_ended イベント送信
-    → Web Client: 結果表示
-    ← MCP: battle_result
-[Claude Desktop]
-```
-
-### 4.4 リーダーボード更新フロー
-
-```
-[定期的/バトル終了時]
-    → Web Client: GET /api/leaderboard
-    → Web Server: DB読み取り
-    → Web Server: レスポンス返却
-    ← Web Client: リーダーボード表示更新
+take_action (Player2)
+  └→ pendingActions[id].player2 = action
+     └→ 両方揃った → resolveTurn()
+          ├→ calculateDamage() × 2（速度による行動順あり）
+          ├→ HP更新・勝敗判定
+          ├→ DB: battle_turns INSERT + battles UPDATE + stats UPDATE
+          └→ Socket.IO: turn_executed / battle_ended emit
 ```
 
 ---
 
-## 5. 通信プロトコル
+## 5. データベース設計
 
-### 5.1 MCPプロトコル（Claude ↔ MCP Server）
+### テーブル一覧（9テーブル）
 
-**Transport**: STDIO（標準入出力）
-**形式**: JSON-RPC 2.0
+| テーブル | 用途 |
+|---------|------|
+| `accounts` | ユーザーアカウント（username, api_key, session_id） |
+| `characters` | キャラクター（ステータス・アビリティ） |
+| `character_abilities` | キャラクター×アビリティ（多対多） |
+| `abilities` | アビリティマスタ（7種） |
+| `battles` | バトル（HP追跡・状態管理） |
+| `battle_turns` | ターンログ（アクション・ダメージ・HP） |
+| `stats` | キャラクター戦績（レーティング・勝敗数） |
+| `queue` | マッチングキュー |
+| `schema_version` | マイグレーション管理 |
 
-**主要ツール**:
-- `create_account(username)` - アカウント作成
-- `create_character(name, prompt, hp, attack, defense, abilities)` - キャラクター作成
-- `join_queue(character_id)` - マッチング参加
-- `get_battle_status(battle_id)` - バトル状態取得
-- `execute_turn(battle_id, action, target)` - ターン実行
-- `get_character_info(character_id)` - キャラクター情報取得
-- `get_battle_history(character_id)` - バトル履歴取得
+### api_key カラム
 
-### 5.2 WebSocket（MCP Server ↔ Web Server ↔ Web Client）
-
-**プロトコル**: Socket.IO
-**イベント**:
-
-**サーバー → クライアント**:
-- `battle_started` - バトル開始通知
-- `turn_executed` - ターン実行結果
-- `battle_ended` - バトル終了通知
-- `leaderboard_updated` - リーダーボード更新
-
-**クライアント → サーバー**:
-- `subscribe_battle(battle_id)` - バトル購読
-- `unsubscribe_battle(battle_id)` - バトル購読解除
-
-### 5.3 REST API（Web Server ↔ Web Client）
-
-**Base URL**: `http://localhost:3000/api`
-
-**エンドポイント**:
-- `GET /battles/:id` - バトル詳細取得
-- `GET /battles` - バトル一覧取得
-- `GET /characters/:id` - キャラクター詳細取得
-- `GET /leaderboard` - リーダーボード取得
-- `GET /stats/:character_id` - 戦績取得
+`accounts.api_key` は起動時に自動マイグレーション（`ALTER TABLE ... ADD COLUMN`）で追加される。既存アカウントは次回ログイン時に `COALESCE` で自動生成。
 
 ---
 
-## 6. セキュリティ設計
+## 6. 認証設計
 
-### 6.1 認証
-
-**ローカル環境のため簡易認証**:
-- アカウント名のみで識別
-- セッションIDによる一時的な認証
-- 本番環境では後からOAuth 2.1に拡張可能
-
-### 6.2 データ整合性
-
-- SQLiteトランザクションによる整合性保証
-- 外部キー制約の有効化
-- バトル中の同時書き込み制御（ロック）
-
-### 6.3 入力バリデーション
-
-- キャラクター名: 1-50文字
-- プロンプト: 1-2000文字
-- ステータス値: 正の整数、合計値上限設定
-- アビリティ: 事前定義リストから選択
-
----
-
-## 7. パフォーマンス設計
-
-### 7.1 データベース最適化
-
-- 頻繁にクエリするカラムにインデックス作成
-- バトルログはJSON形式で単一カラムに格納
-- 定期的なVACUUM実行
-
-### 7.2 WebSocket最適化
-
-- バトル参加者のみにイベント送信（ルーム機能）
-- イベントペイロードの最小化
-- 自動再接続機能の実装
-
-### 7.3 キャッシュ戦略
-
-- キャラクター情報のメモリキャッシュ
-- リーダーボードの定期更新（5秒間隔）
-
----
-
-## 8. エラーハンドリング
-
-### 8.1 MCP Server
-
-- LLMタイムアウト: 30秒でターンスキップ
-- DB接続エラー: リトライ3回
-- バトルロジックエラー: ログ記録、バトル中断
-
-### 8.2 Web Server
-
-- WebSocket切断: 自動再接続
-- API エラー: 適切なHTTPステータスコード返却
-- 不正なリクエスト: バリデーションエラー返却
-
-### 8.3 Web Client
-
-- 接続エラー: ユーザーへの通知表示
-- データ取得失敗: リトライボタン表示
-- タイムアウト: ローディング表示とキャンセル機能
-
----
-
-## 9. デプロイ構成
-
-### 9.1 開発環境
+### MCP接続（LLMプレイヤー）
 
 ```
-localhost:
-  - MCPサーバー: STDIO (Claude Desktopから起動)
-  - Webサーバー: http://localhost:3000
-  - Webクライアント: http://localhost:5173 (Vite dev server)
-  - データベース: ./src/database/llmbattle.db
+x-api-key: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+→ accounts テーブルで照合
+→ account オブジェクトを MCP サーバークロージャに渡す
+→ ツール内で account.id を使って所有権チェック
 ```
 
-### 9.2 本番環境（将来拡張）
+### REST API（将来の管理画面・観戦クライアント向け）
 
 ```
-server:
-  - MCPサーバー: WebSocket (wss://...)
-  - Webサーバー: https://... (Nginx reverse proxy)
-  - Webクライアント: 静的ファイル配信
-  - データベース: PostgreSQL (スケール時)
+Authorization: Bearer <JWT>
+→ accounts.login → JWT発行（7日有効）
+→ authMiddleware で検証
 ```
 
 ---
 
-## 10. 拡張性
+## 7. ファイル構成
 
-### 10.1 近い将来の拡張
-
-- キャラクターレベルアップシステム
-- アビリティのカスタマイズ
-- ランクマッチモード
-- 観戦モード
-
-### 10.2 長期的な拡張
-
-- マルチプレイヤートーナメント
-- キャラクターのビジュアル表示
-- リプレイ機能
-- AIによる戦略分析
-
----
-
-## 11. 技術的負債の管理
-
-### 11.1 既知の制約
-
-- SQLiteは並行書き込みに弱い → 将来PostgreSQLへ移行
-- MCPプロトコルはまだ発展途上 → 定期的な仕様確認
-
-### 11.2 リファクタリング計画
-
-- フェーズ7（統合テスト後）にコードレビュー実施
-- 重複コードの削減
-- テストカバレッジの向上
+```
+src/web/
+├── server.js           # Expressサーバー・MCP/REST/WebSocketマウント・マイグレーション
+├── io.js               # Socket.IOシングルトン（循環依存回避）
+├── db.js               # SQLiteラッパー（query/get/run/transaction）
+├── api.js              # 読み取り専用APIルーター（leaderboard等）
+├── mcp/
+│   └── index.js        # MCPサーバー（7ツール）・handleMcpRequest
+├── api/
+│   ├── accounts.js     # POST /api/accounts, /api/accounts/login
+│   ├── characters.js   # POST/GET /api/characters, /api/abilities
+│   ├── battles.js      # POST /api/battles/:id/action + processBattleAction export
+│   └── matchmaking.js  # POST/DELETE/GET /api/queue
+├── middleware/
+│   ├── auth.js         # generateToken / verifyToken / authMiddleware
+│   └── error_handler.js
+└── client/             # React + Vite（観戦UI）
+    └── src/
+        ├── pages/      # Home, BattleViewer, CharacterList, Leaderboard
+        └── components/ # Battle/, Character/, Leaderboard/, Common/
+```
 
 ---
 
-## 12. 関連ドキュメント
+## 8. 既知の課題・今後の方針
+
+| 課題 | 現状 | 方針 |
+|------|------|------|
+| スケーラビリティ | SQLite（シングルプロセス） | 本番はPostgreSQL + Redis（pendingActions） |
+| pendingActions | in-memory Map | 複数プロセス時はRedisに移行 |
+| MCP SSE streaming | 未対応（Stateless HTTP） | 必要に応じてSSE transport追加 |
+| 観戦UI | 読み取り専用 | プレイUI追加は将来検討 |
+| check_queue | マッチ後も "matched" を返し続ける | ポーリング完了後のクリーンアップ改善 |
+
+---
+
+## 関連ドキュメント
 
 - [データベース設計](./database.md)
-- [MCPサーバー設計](./mcp-server.md)
 - [バトルロジック設計](./battle-logic.md)
+- [マッチングロジック設計](./matching-logic.md)
 - [Webビュアー設計](./web-viewer.md)
-
----
-
-**設計承認**: 待機中
-**次のステップ**: データベース設計の詳細化

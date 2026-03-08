@@ -11,6 +11,9 @@ import charactersRouter from './api/characters.js';
 import matchmakingRouter from './api/matchmaking.js';
 import battlesRouter from './api/battles.js';
 import { errorHandler, notFoundHandler } from './middleware/error_handler.js';
+import { handleMcpRequest } from './mcp/index.js';
+import { run } from './db.js';
+import { setIo } from './io.js';
 
 // Load environment variables
 dotenv.config();
@@ -38,6 +41,9 @@ app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
   next();
 });
+
+// MCP endpoint - all HTTP methods (Streamable HTTP transport)
+app.all('/mcp', handleMcpRequest);
 
 // API routes (order matters - specific routes before general ones)
 app.use('/api/accounts', accountsRouter); // Account management (create, login)
@@ -83,10 +89,21 @@ io.on('connection', (socket) => {
   });
 });
 
-// Export io for use in other modules
-export { io };
+// Register io singleton (breaks circular dependency with API routers)
+setIo(io);
+
+// Run DB migrations on startup
+async function runMigrations() {
+  try {
+    await run(`ALTER TABLE accounts ADD COLUMN api_key TEXT`);
+    console.log('Migration: added api_key column to accounts');
+  } catch (e) {
+    // Column already exists - expected on subsequent starts
+  }
+}
 
 // Start server
+runMigrations();
 httpServer.listen(PORT, () => {
   console.log(`===================================`);
   console.log(`LLM Battle Web Server`);

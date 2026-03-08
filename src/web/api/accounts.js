@@ -4,7 +4,7 @@
 
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { query, run } from '../db.js';
+import { query, run, get } from '../db.js';
 import { validateUsername } from '../utils/validation.js';
 import { generateToken } from '../middleware/auth.js';
 import {
@@ -38,14 +38,15 @@ router.post('/', async (req, res, next) => {
       throw new ConflictError(`Username '${username}' is already taken`);
     }
 
-    // Generate session ID
+    // Generate session ID and API key
     const sessionId = uuidv4();
+    const apiKey = uuidv4();
 
     // Create account
     const result = await run(
-      `INSERT INTO accounts (username, session_id, created_at, last_login)
-       VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-      [username, sessionId]
+      `INSERT INTO accounts (username, session_id, api_key, created_at, last_login)
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [username, sessionId, apiKey]
     );
 
     const accountId = result.lastID;
@@ -57,6 +58,7 @@ router.post('/', async (req, res, next) => {
       account_id: accountId,
       session_id: sessionId,
       token: token,
+      api_key: apiKey,
       message: `Account '${username}' created successfully`
     });
 
@@ -89,15 +91,17 @@ router.post('/login', async (req, res, next) => {
 
     const accountId = accounts[0].id;
 
-    // Generate new session ID
+    // Generate new session ID; ensure api_key exists (migrate old accounts)
     const sessionId = uuidv4();
+    const existingKey = await get('SELECT api_key FROM accounts WHERE id = ?', [accountId]);
+    const apiKey = existingKey?.api_key || uuidv4();
 
     // Update session ID and last login time
     await run(
       `UPDATE accounts
-       SET session_id = ?, last_login = CURRENT_TIMESTAMP
+       SET session_id = ?, api_key = COALESCE(api_key, ?), last_login = CURRENT_TIMESTAMP
        WHERE id = ?`,
-      [sessionId, accountId]
+      [sessionId, apiKey, accountId]
     );
 
     // Get owned characters
@@ -126,6 +130,7 @@ router.post('/login', async (req, res, next) => {
       account_id: accountId,
       session_id: sessionId,
       token: token,
+      api_key: apiKey,
       characters: characterList,
       message: `Welcome back, ${username}!`
     });

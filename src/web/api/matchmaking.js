@@ -11,7 +11,7 @@ import {
   ValidationError,
   NotFoundError
 } from '../middleware/error_handler.js';
-import { io } from '../server.js';
+import { getIo } from '../io.js';
 
 const router = express.Router();
 
@@ -241,7 +241,7 @@ async function createBattle(player1Id, player2Id) {
   });
 
   // Emit WebSocket event
-  io.emit('battle_started', {
+  getIo()?.emit('battle_started', {
     battle_id: result.battle_id,
     player1_id: player1Id,
     player2_id: player2Id

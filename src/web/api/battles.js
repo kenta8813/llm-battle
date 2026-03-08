@@ -11,18 +11,18 @@ import {
   ValidationError,
   NotFoundError
 } from '../middleware/error_handler.js';
-import { io } from '../server.js';
+import { getIo } from '../io.js';
 
 const router = express.Router();
 
 // In-memory store for pending actions per battle
 // Map<battleId, { player1?: {action, ability_id}, player2?: {action, ability_id} }>
-const pendingActions = new Map();
+export const pendingActions = new Map();
 
 /**
  * Calculate damage dealt by attacker to defender
  */
-function calculateDamage(attackerStats, defenderAction, defenderStats, actionType, ability = null) {
+export function calculateDamage(attackerStats, defenderAction, defenderStats, actionType, ability = null) {
   // Handle dodge
   if (defenderAction === 'dodge') {
     const speedDiff = defenderStats.computed_speed - attackerStats.computed_speed;
@@ -60,7 +60,7 @@ function calculateDamage(attackerStats, defenderAction, defenderStats, actionTyp
  * Resolve a battle turn with both players' actions.
  * Returns damage dealt/received and final HP values.
  */
-function resolveTurn(char1Stats, char2Stats, p1Action, p2Action, ability1, ability2, battle) {
+export function resolveTurn(char1Stats, char2Stats, p1Action, p2Action, ability1, ability2, battle) {
   const hp = {
     player1: battle.player1_hp,
     player2: battle.player2_hp
@@ -165,7 +165,7 @@ router.post('/', authMiddleware, async (req, res, next) => {
       return { battle_id: battleId };
     });
 
-    io.emit('battle_started', {
+    getIo()?.emit('battle_started', {
       battle_id: result.battle_id,
       player1_id,
       player2_id
@@ -361,7 +361,7 @@ router.post('/:id/action', authMiddleware, async (req, res, next) => {
     });
 
     // Emit WebSocket events
-    io.to(`battle_${battleId}`).emit('turn_executed', {
+    getIo()?.to(`battle_${battleId}`).emit('turn_executed', {
       battle_id: battleId,
       turn_number: turnNumber,
       player1_action: p1ActionData.action,
@@ -372,7 +372,7 @@ router.post('/:id/action', authMiddleware, async (req, res, next) => {
     });
 
     if (battleEnded) {
-      io.to(`battle_${battleId}`).emit('battle_ended', {
+      getIo()?.to(`battle_${battleId}`).emit('battle_ended', {
         battle_id: battleId,
         winner_id: winnerId,
         is_draw: isDraw
@@ -489,7 +489,7 @@ router.post('/:id/turns', authMiddleware, async (req, res, next) => {
       }
     });
 
-    io.to(`battle_${battleId}`).emit('turn_executed', {
+    getIo()?.to(`battle_${battleId}`).emit('turn_executed', {
       battle_id: battleId,
       turn_number,
       player1_action,
@@ -499,7 +499,7 @@ router.post('/:id/turns', authMiddleware, async (req, res, next) => {
     });
 
     if (winner_id) {
-      io.to(`battle_${battleId}`).emit('battle_ended', { battle_id: battleId, winner_id });
+      getIo()?.to(`battle_${battleId}`).emit('battle_ended', { battle_id: battleId, winner_id });
     }
 
     res.json({
@@ -601,5 +601,112 @@ router.get('/:id/turns', async (req, res, next) => {
     next(error);
   }
 });
+
+/**
+ * Process a battle action - shared logic for REST and MCP
+ * @param {number} battleId
+ * @param {number} characterId - the acting character
+ * @param {string} action - attack|defend|dodge|ability
+ * @param {number|null} abilityId
+ * @returns {Promise<Object>} { status: 'waiting' } or turn result
+ */
+export async function processBattleAction(battleId, characterId, action, abilityId = null) {
+  const battle = await get(
+    `SELECT b.*,
+            c1.computed_attack as p1_attack, c1.computed_defense as p1_defense, c1.computed_speed as p1_speed,
+            c2.computed_attack as p2_attack, c2.computed_defense as p2_defense, c2.computed_speed as p2_speed
+     FROM battles b
+     JOIN characters c1 ON b.player1_id = c1.id
+     JOIN characters c2 ON b.player2_id = c2.id
+     WHERE b.id = ?`,
+    [battleId]
+  );
+
+  if (!battle) throw new Error('Battle not found');
+  if (battle.status !== 'in_progress') throw new Error(`Battle is not in progress (status: ${battle.status})`);
+
+  let playerKey;
+  if (characterId === battle.player1_id) playerKey = 'player1';
+  else if (characterId === battle.player2_id) playerKey = 'player2';
+  else throw new Error('Character is not in this battle');
+
+  if (!pendingActions.has(battleId)) pendingActions.set(battleId, {});
+  const pending = pendingActions.get(battleId);
+  pending[playerKey] = { action, ability_id: abilityId || null };
+
+  if (!pending.player1 || !pending.player2) {
+    return { status: 'waiting', message: '相手の行動を待っています' };
+  }
+
+  const p1ActionData = pending.player1;
+  const p2ActionData = pending.player2;
+  pendingActions.delete(battleId);
+
+  let ability1 = null, ability2 = null;
+  if (p1ActionData.ability_id) ability1 = await get('SELECT * FROM abilities WHERE id = ?', [p1ActionData.ability_id]);
+  if (p2ActionData.ability_id) ability2 = await get('SELECT * FROM abilities WHERE id = ?', [p2ActionData.ability_id]);
+
+  const char1Stats = { computed_attack: battle.p1_attack, computed_defense: battle.p1_defense, computed_speed: battle.p1_speed };
+  const char2Stats = { computed_attack: battle.p2_attack, computed_defense: battle.p2_defense, computed_speed: battle.p2_speed };
+
+  const turnResult = resolveTurn(char1Stats, char2Stats, p1ActionData, p2ActionData, ability1, ability2, battle);
+  const { player1HpAfter, player2HpAfter } = turnResult;
+  const turnNumber = battle.current_turn + 1;
+
+  let winnerId = null, isDraw = false;
+  if (player1HpAfter <= 0 || player2HpAfter <= 0 || turnNumber >= battle.max_turns) {
+    if (player1HpAfter <= 0 && player2HpAfter <= 0) isDraw = true;
+    else if (player1HpAfter <= 0) winnerId = battle.player2_id;
+    else if (player2HpAfter <= 0) winnerId = battle.player1_id;
+    else {
+      if (player1HpAfter > player2HpAfter) winnerId = battle.player1_id;
+      else if (player2HpAfter > player1HpAfter) winnerId = battle.player2_id;
+      else isDraw = true;
+    }
+  }
+  const battleEnded = winnerId !== null || isDraw;
+
+  const turnResultJson = JSON.stringify({
+    turn_number: turnNumber, player1_action: p1ActionData.action, player2_action: p2ActionData.action,
+    player1_damage_dealt: turnResult.player1DamageDealt, player2_damage_dealt: turnResult.player2DamageDealt,
+    player1_hp_after: player1HpAfter, player2_hp_after: player2HpAfter, effects: turnResult.effects
+  });
+
+  const dbResult = await transaction(async () => {
+    await run(
+      `INSERT INTO battle_turns (battle_id, turn_number, player1_action, player1_ability_id, player1_damage_dealt, player1_damage_received, player1_hp_after, player2_action, player2_ability_id, player2_damage_dealt, player2_damage_received, player2_hp_after, turn_result)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [battleId, turnNumber, p1ActionData.action, p1ActionData.ability_id, turnResult.player1DamageDealt, turnResult.player1DamageReceived, player1HpAfter, p2ActionData.action, p2ActionData.ability_id, turnResult.player2DamageDealt, turnResult.player2DamageReceived, player2HpAfter, turnResultJson]
+    );
+
+    if (battleEnded) {
+      await run(`UPDATE battles SET current_turn = ?, player1_hp = ?, player2_hp = ?, winner_id = ?, status = 'finished', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        [turnNumber, player1HpAfter, player2HpAfter, winnerId, battleId]);
+      if (isDraw) {
+        await run(`UPDATE stats SET total_battles = total_battles + 1, draws = draws + 1 WHERE character_id IN (?, ?)`, [battle.player1_id, battle.player2_id]);
+      } else {
+        const loserId = winnerId === battle.player1_id ? battle.player2_id : battle.player1_id;
+        await run(`UPDATE stats SET total_battles = total_battles + 1, wins = wins + 1, rating = rating + 25 WHERE character_id = ?`, [winnerId]);
+        await run(`UPDATE stats SET total_battles = total_battles + 1, losses = losses + 1, rating = CASE WHEN rating > 25 THEN rating - 25 ELSE rating END WHERE character_id = ?`, [loserId]);
+      }
+      return { status: 'finished', winner_id: winnerId, is_draw: isDraw };
+    } else {
+      await run(`UPDATE battles SET current_turn = ?, player1_hp = ?, player2_hp = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [turnNumber, player1HpAfter, player2HpAfter, battleId]);
+      return { status: 'in_progress' };
+    }
+  });
+
+  getIo()?.to(`battle_${battleId}`).emit('turn_executed', { battle_id: battleId, turn_number: turnNumber, player1_action: p1ActionData.action, player2_action: p2ActionData.action, player1_hp: player1HpAfter, player2_hp: player2HpAfter, effects: turnResult.effects });
+  if (battleEnded) getIo()?.to(`battle_${battleId}`).emit('battle_ended', { battle_id: battleId, winner_id: winnerId, is_draw: isDraw });
+
+  return {
+    turn_number: turnNumber,
+    player1_action: p1ActionData.action, player2_action: p2ActionData.action,
+    player1_damage_dealt: turnResult.player1DamageDealt, player2_damage_dealt: turnResult.player2DamageDealt,
+    player1_hp: player1HpAfter, player2_hp: player2HpAfter,
+    effects: turnResult.effects,
+    ...dbResult,
+  };
+}
 
 export default router;
