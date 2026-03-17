@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/web/server.js",
     "dev": "nodemon src/web/server.js",
-    "build": "cd src/web/client && npm install && npm run build"
+    "build": "cd src/web/client && npm install --include=dev && npm run build"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.17.0",
