@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: llmbattle
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Set these manually in the Render dashboard:
+      - key: DATABASE_URL
+        sync: false   # Paste connection string from Supabase
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGINS
+        sync: false   # e.g. https://llmbattle.onrender.com
+      - key: API_BASE_URL
+        sync: false   # e.g. https://llmbattle.onrender.com

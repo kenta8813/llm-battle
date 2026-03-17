@@ -1,130 +1,101 @@
 /**
- * Database module with SQLite concurrent access improvements
+ * Database module - PostgreSQL via Supabase
+ * Wraps pg.Pool with a SQLite-compatible API (query/get/run/transaction).
+ * ? placeholders are auto-converted to $1, $2, ... for pg.
  */
 
-import sqlite3 from 'sqlite3';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import pkg from 'pg';
+import { AsyncLocalStorage } from 'async_hooks';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const { Pool } = pkg;
 
-// Get database path from environment variable or use default
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, '../database/llmbattle.db');
-
-// Create database connection
-const db = new sqlite3.Database(DB_PATH, (err) => {
-  if (err) {
-    console.error('Error connecting to database:', err.message);
-  } else {
-    console.log('Connected to SQLite database at:', DB_PATH);
-
-    // Enable WAL mode for better concurrent access
-    db.run('PRAGMA journal_mode = WAL', (err) => {
-      if (err) {
-        console.error('Error enabling WAL mode:', err.message);
-      } else {
-        console.log('WAL mode enabled for concurrent access');
-      }
-    });
-
-    // Set busy timeout to 5 seconds
-    db.run('PRAGMA busy_timeout = 5000', (err) => {
-      if (err) {
-        console.error('Error setting busy timeout:', err.message);
-      }
-    });
-
-    // Enable foreign key constraints
-    db.run('PRAGMA foreign_keys = ON', (err) => {
-      if (err) {
-        console.error('Error enabling foreign keys:', err.message);
-      }
-    });
-  }
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
 });
 
-// Promise-based query execution (SELECT)
-export function query(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(rows);
-      }
-    });
-  });
-}
+pool.on('connect', () => {
+  console.log('Connected to PostgreSQL database');
+});
 
-// Get a single row (SELECT)
-export function get(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(row);
-      }
-    });
-  });
-}
+pool.on('error', (err) => {
+  console.error('PostgreSQL pool error:', err);
+});
 
-// Run a query (INSERT, UPDATE, DELETE)
-export function run(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function(err) {
-      if (err) {
-        reject(err);
-      } else {
-        resolve({ lastID: this.lastID, changes: this.changes });
-      }
-    });
-  });
+// Propagates the transaction client through async context
+const txStorage = new AsyncLocalStorage();
+
+/**
+ * Convert ? placeholders to $1, $2, ... for pg
+ */
+function convertPlaceholders(sql) {
+  let i = 0;
+  return sql.replace(/\?/g, () => `$${++i}`);
 }
 
 /**
- * Execute a transaction with retry logic
- * @param {Function} callback - Async function that performs database operations
- * @param {number} maxRetries - Maximum number of retries on SQLITE_BUSY
- * @returns {Promise} Result of the callback
+ * Tables that have an auto-generated `id` column (SERIAL PRIMARY KEY).
+ * Used to decide whether to append RETURNING id after INSERT.
  */
-export async function transaction(callback, maxRetries = 3) {
-  let retries = maxRetries;
+const TABLES_WITH_ID = [
+  'accounts', 'characters', 'battles', 'battle_turns',
+  'queue', 'abilities', 'schema_version',
+];
 
-  while (retries > 0) {
-    try {
-      // Begin transaction
-      await run('BEGIN IMMEDIATE TRANSACTION');
+function getClient() {
+  return txStorage.getStore() || pool;
+}
 
-      // Execute callback
-      const result = await callback();
+/**
+ * Execute a SELECT that returns multiple rows.
+ */
+export function query(sql, params = []) {
+  return getClient().query(convertPlaceholders(sql), params).then(r => r.rows);
+}
 
-      // Commit transaction
-      await run('COMMIT');
+/**
+ * Execute a SELECT that returns a single row (or null).
+ */
+export function get(sql, params = []) {
+  return getClient().query(convertPlaceholders(sql), params).then(r => r.rows[0] || null);
+}
 
-      return result;
+/**
+ * Execute an INSERT / UPDATE / DELETE.
+ * Returns { lastID, changes } for compatibility with sqlite3 callers.
+ * For INSERT into tables with an `id` column, appends RETURNING id.
+ */
+export async function run(sql, params = []) {
+  const trimmed = sql.trim().toUpperCase();
+  const isInsert = trimmed.startsWith('INSERT');
+  const needsReturning = isInsert &&
+    TABLES_WITH_ID.some(t => trimmed.includes(`INTO ${t.toUpperCase()}`));
 
-    } catch (error) {
-      // Rollback on error
-      try {
-        await run('ROLLBACK');
-      } catch (rollbackError) {
-        console.error('Error during rollback:', rollbackError);
-      }
+  const convertedSql = convertPlaceholders(sql);
+  const finalSql = needsReturning ? `${convertedSql} RETURNING id` : convertedSql;
 
-      // Retry on SQLITE_BUSY
-      if (error.code === 'SQLITE_BUSY' && retries > 1) {
-        retries--;
-        console.warn(`SQLite busy, retrying... (${maxRetries - retries}/${maxRetries})`);
-        await new Promise(resolve => setTimeout(resolve, 100)); // Wait 100ms
-        continue;
-      }
+  const result = await getClient().query(finalSql, params);
+  return { lastID: result.rows[0]?.id, changes: result.rowCount };
+}
 
-      // Throw error if not retrying
-      throw error;
-    }
+/**
+ * Execute a callback inside a transaction.
+ * Any query/get/run calls made within the callback automatically use the
+ * same pg client (via AsyncLocalStorage), so no callsite changes needed.
+ */
+export async function transaction(callback) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await txStorage.run(client, callback);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
 }
 
-export default db;
+export default pool;

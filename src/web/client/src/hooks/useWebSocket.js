@@ -6,7 +6,8 @@ export function useWebSocket({ battleId, onBattleStarted, onTurnExecuted, onBatt
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    const newSocket = io('http://localhost:3000', {
+    const WS_URL = import.meta.env.VITE_WS_URL || 'http://localhost:3000';
+    const newSocket = io(WS_URL, {
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionAttempts: 5,

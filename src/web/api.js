@@ -27,7 +27,7 @@ router.get('/leaderboard', async (req, res) => {
         s.wins,
         s.losses,
         s.draws,
-        ROUND(CAST(s.wins AS REAL) / NULLIF(s.total_battles, 0) * 100, 2) as win_rate,
+        ROUND(s.wins::numeric / NULLIF(s.total_battles, 0) * 100, 2) as win_rate,
         s.current_win_streak,
         s.longest_win_streak,
         s.total_damage_dealt,
@@ -405,38 +405,38 @@ router.get('/stats', async (req, res) => {
   try {
     // 総バトル数
     const totalBattlesSql = `
-      SELECT COUNT(*) as count FROM battles WHERE status = 'finished'
+      SELECT COUNT(*)::integer as count FROM battles WHERE status = 'finished'
     `;
     const totalBattlesResult = await get(totalBattlesSql);
     const totalBattles = totalBattlesResult.count;
 
     // 総キャラクター数
     const totalCharactersSql = `
-      SELECT COUNT(*) as count FROM characters
+      SELECT COUNT(*)::integer as count FROM characters
     `;
     const totalCharactersResult = await get(totalCharactersSql);
     const totalCharacters = totalCharactersResult.count;
 
     // 今日のバトル数
     const todayBattlesSql = `
-      SELECT COUNT(*) as count
+      SELECT COUNT(*)::integer as count
       FROM battles
       WHERE status = 'finished'
-        AND DATE(started_at) = DATE('now')
+        AND started_at::date = CURRENT_DATE
     `;
     const todayBattlesResult = await get(todayBattlesSql);
     const todayBattles = todayBattlesResult.count;
 
     // 進行中のバトル数
     const activeBattlesSql = `
-      SELECT COUNT(*) as count FROM battles WHERE status = 'in_progress'
+      SELECT COUNT(*)::integer as count FROM battles WHERE status = 'in_progress'
     `;
     const activeBattlesResult = await get(activeBattlesSql);
     const activeBattles = activeBattlesResult.count;
 
     // 待機中のプレイヤー数
     const queueSql = `
-      SELECT COUNT(*) as count FROM queue
+      SELECT COUNT(*)::integer as count FROM queue
     `;
     const queueResult = await get(queueSql);
     const playersInQueue = queueResult.count;

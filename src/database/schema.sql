@@ -1,19 +1,17 @@
 -- LLMバトルゲーム データベーススキーマ
--- DBMS: SQLite 3.51.2
--- 作成日: 2026-02-28
-
--- 外部キー制約を有効化
-PRAGMA foreign_keys = ON;
+-- DBMS: PostgreSQL (Supabase)
+-- 作成日: 2026-02-28 / Updated: 2026-03-18
 
 -- ==================================================
 -- 1. accounts（アカウント）
 -- ==================================================
 CREATE TABLE IF NOT EXISTS accounts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     username TEXT UNIQUE NOT NULL,
     session_id TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    last_login DATETIME DEFAULT CURRENT_TIMESTAMP
+    api_key TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_login TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_accounts_username ON accounts(username);
@@ -23,7 +21,7 @@ CREATE INDEX IF NOT EXISTS idx_accounts_session_id ON accounts(session_id);
 -- 2. characters（キャラクター）
 -- ==================================================
 CREATE TABLE IF NOT EXISTS characters (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     account_id INTEGER NOT NULL,
     name TEXT NOT NULL,
     prompt TEXT NOT NULL,
@@ -41,8 +39,8 @@ CREATE TABLE IF NOT EXISTS characters (
     computed_defense INTEGER NOT NULL,
     computed_speed INTEGER NOT NULL,
 
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );
@@ -54,14 +52,14 @@ CREATE INDEX IF NOT EXISTS idx_characters_level ON characters(level);
 -- 3. abilities（アビリティマスター）
 -- ==================================================
 CREATE TABLE IF NOT EXISTS abilities (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     name TEXT UNIQUE NOT NULL,
     description TEXT NOT NULL,
     effect_type TEXT NOT NULL CHECK(effect_type IN ('damage', 'heal', 'buff', 'debuff')),
     power INTEGER NOT NULL CHECK(power >= 0),
     cost INTEGER DEFAULT 0,
     cooldown INTEGER DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_abilities_effect_type ON abilities(effect_type);
@@ -72,7 +70,7 @@ CREATE INDEX IF NOT EXISTS idx_abilities_effect_type ON abilities(effect_type);
 CREATE TABLE IF NOT EXISTS character_abilities (
     character_id INTEGER NOT NULL,
     ability_id INTEGER NOT NULL,
-    acquired_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    acquired_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
     PRIMARY KEY (character_id, ability_id),
     FOREIGN KEY (character_id) REFERENCES characters(id) ON DELETE CASCADE,
@@ -86,7 +84,7 @@ CREATE INDEX IF NOT EXISTS idx_char_abilities_ability ON character_abilities(abi
 -- 5. battles（バトル）
 -- ==================================================
 CREATE TABLE IF NOT EXISTS battles (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     player1_id INTEGER NOT NULL,
     player2_id INTEGER NOT NULL,
     winner_id INTEGER,
@@ -105,9 +103,9 @@ CREATE TABLE IF NOT EXISTS battles (
     status TEXT NOT NULL DEFAULT 'waiting' CHECK(status IN ('waiting', 'in_progress', 'finished', 'cancelled')),
 
     -- 時刻
-    started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    ended_at DATETIME,
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ended_at TIMESTAMP,
 
     FOREIGN KEY (player1_id) REFERENCES characters(id) ON DELETE CASCADE,
     FOREIGN KEY (player2_id) REFERENCES characters(id) ON DELETE CASCADE,
@@ -123,7 +121,7 @@ CREATE INDEX IF NOT EXISTS idx_battles_started_at ON battles(started_at DESC);
 -- 6. battle_turns（バトルターン）
 -- ==================================================
 CREATE TABLE IF NOT EXISTS battle_turns (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     battle_id INTEGER NOT NULL,
     turn_number INTEGER NOT NULL,
 
@@ -145,7 +143,7 @@ CREATE TABLE IF NOT EXISTS battle_turns (
 
     -- ターン結果
     turn_result TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
     FOREIGN KEY (battle_id) REFERENCES battles(id) ON DELETE CASCADE,
     FOREIGN KEY (player1_ability_id) REFERENCES abilities(id),
@@ -168,7 +166,7 @@ CREATE TABLE IF NOT EXISTS stats (
     longest_win_streak INTEGER DEFAULT 0,
     current_win_streak INTEGER DEFAULT 0,
     rating INTEGER DEFAULT 1000,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
     FOREIGN KEY (character_id) REFERENCES characters(id) ON DELETE CASCADE
 );
@@ -180,10 +178,10 @@ CREATE INDEX IF NOT EXISTS idx_stats_wins ON stats(wins DESC);
 -- 8. queue（マッチング待機キュー）
 -- ==================================================
 CREATE TABLE IF NOT EXISTS queue (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     character_id INTEGER UNIQUE NOT NULL,
     rating INTEGER NOT NULL,
-    joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
     FOREIGN KEY (character_id) REFERENCES characters(id) ON DELETE CASCADE
 );
@@ -196,10 +194,10 @@ CREATE INDEX IF NOT EXISTS idx_queue_joined_at ON queue(joined_at);
 -- ==================================================
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY,
-    applied_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     description TEXT
 );
 
--- スキーマバージョンの初期値挿入
-INSERT OR IGNORE INTO schema_version (version, description)
-VALUES (1, 'Initial schema - LLM Battle Game');
+INSERT INTO schema_version (version, description)
+VALUES (1, 'Initial schema - LLM Battle Game')
+ON CONFLICT (version) DO NOTHING;

@@ -12,7 +12,6 @@ import matchmakingRouter from './api/matchmaking.js';
 import battlesRouter from './api/battles.js';
 import { errorHandler, notFoundHandler } from './middleware/error_handler.js';
 import { handleMcpRequest } from './mcp/index.js';
-import { run } from './db.js';
 import { setIo } from './io.js';
 
 // Load environment variables
@@ -24,16 +23,22 @@ const __dirname = path.dirname(__filename);
 // Initialize Express app
 const app = express();
 const httpServer = createServer(app);
+const PORT = process.env.PORT || 3000;
+
+// CORS origins: comma-separated list in CORS_ORIGINS env var
+const allowedOrigins = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',').map(o => o.trim())
+  : ['http://localhost:5173', 'http://localhost:3000'];
+
 const io = new Server(httpServer, {
   cors: {
-    origin: 'http://localhost:5173',
+    origin: allowedOrigins,
     methods: ['GET', 'POST']
   }
 });
-const PORT = process.env.PORT || 3000;
 
 // Middleware
-app.use(cors());
+app.use(cors({ origin: allowedOrigins }));
 app.use(express.json());
 
 // Request logging middleware
@@ -52,13 +57,21 @@ app.use('/api/queue', matchmakingRouter); // Matchmaking queue (CRUD)
 app.use('/api/battles', battlesRouter); // Battle management (CRUD)
 app.use('/api', apiRouter); // Existing read-only routes (leaderboard, etc.) - must be last
 
-// Static files (future web client)
-const publicPath = path.join(__dirname, '../../public');
-app.use(express.static(publicPath));
+// Serve React client build
+const clientBuildPath = path.join(__dirname, 'client/dist');
+app.use(express.static(clientBuildPath));
 
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// SPA fallback - serve index.html for all non-API routes
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api') || req.path.startsWith('/mcp') || req.path === '/health') {
+    return next();
+  }
+  res.sendFile(path.join(clientBuildPath, 'index.html'), err => { if (err) next(); });
 });
 
 // 404 handler (must be before error handler)
@@ -92,18 +105,7 @@ io.on('connection', (socket) => {
 // Register io singleton (breaks circular dependency with API routers)
 setIo(io);
 
-// Run DB migrations on startup
-async function runMigrations() {
-  try {
-    await run(`ALTER TABLE accounts ADD COLUMN api_key TEXT`);
-    console.log('Migration: added api_key column to accounts');
-  } catch (e) {
-    // Column already exists - expected on subsequent starts
-  }
-}
-
 // Start server
-runMigrations();
 httpServer.listen(PORT, () => {
   console.log(`===================================`);
   console.log(`LLM Battle Web Server`);
